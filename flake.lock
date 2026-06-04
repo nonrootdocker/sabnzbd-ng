@@ -46,11 +46,11 @@
     "sabnzbd-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1779807299,
-        "narHash": "sha256-76pnXTKIyOxQjErHPwX2VonSTPNPyKQSFBj6WklG+3s=",
+        "lastModified": 1780473722,
+        "narHash": "sha256-wMl/WKkQNJ0bFQkcObkgtvPB3bcyHBPLjD0o+XPqNAo=",
         "owner": "sabnzbd",
         "repo": "sabnzbd",
-        "rev": "cc61dc974b383e5bce04746274407448b6d0443e",
+        "rev": "23c00b571c3f776c61cd8b116d36793f81629123",
         "type": "github"
       },
       "original": {
