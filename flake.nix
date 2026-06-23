@@ -69,6 +69,16 @@
       ps.zc-lockfile
     ]);
 
+    # ----------------------------
+    # SABnzbd version: read from the source's own version.py (`__version__ = "X.Y.Z"`).
+    # Exposed as the `version` output for CI tagging; matches whatever sabnzbd-src
+    # is locked/overridden to.
+    # ----------------------------
+    sabnzbdVersion = pkgs.runCommand "sabnzbd-version" { } ''
+      grep -oE '__version__ *= *"[^"]*"' ${sabnzbd-src}/sabnzbd/version.py \
+        | head -n1 | sed -E 's/.*"([^"]*)".*/\1/' | tr -d '\n' > $out
+    '';
+
     sabnzbd = pkgs.stdenv.mkDerivation {
       pname = "sabnzbd";
       version = "latest";
@@ -111,8 +121,9 @@
   in {
     packages.${system} = {
       default = self.packages.${system}.sabnzbd-image;
+      version = sabnzbdVersion;
       sabnzbd-image = pkgs.dockerTools.buildImage {
-        name = "minimalbase-ng";
+        name = "sabnzbd";
         tag = "latest";
         fromImage = minimalbase.packages.${system}.base-image;
 

@@ -1,21 +1,26 @@
-name: Build SABnzbd Image
+name: Build OCI Image
 
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
   packages: write
-  
+
 jobs:
   build:
     runs-on: ubuntu-latest
-
+    env:
+      # Per-app knobs — the only lines that differ between repos.
+      UPSTREAM_REPO: sabnzbd/sabnzbd
+      UPSTREAM_INPUT: sabnzbd-src
+      TAG_REGEX: '^[0-9]+\.[0-9]+\.[0-9]+$'   # stable releases only (excludes Beta/RC)
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install Nix
         uses: cachix/install-nix-action@v31
@@ -24,11 +29,42 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
-      - name: Build
-        run: nix build -L
-
-      - name: Flake check
+      # --- Pull requests: just validate the flake builds (committed lock). ---
+      - name: Flake check (PR)
+        if: github.event_name == 'pull_request'
         run: nix flake check -L
+
+      # --- Publish path (push to main / manual): build the latest upstream release. ---
+      - name: Resolve latest upstream release tag
+        if: github.event_name != 'pull_request'
+        id: resolve
+        run: |
+          set -euo pipefail
+          # Pure git, no API: resolve the newest stable tag with a small retry so a
+          # transient network blip fails the run cleanly instead of bumping wrong.
+          for attempt in 1 2 3; do
+            REFS=$(git ls-remote --tags --refs "https://github.com/${UPSTREAM_REPO}") && break
+            echo "ls-remote attempt $attempt failed; retrying in 15s..."; sleep 15
+          done
+          [ -n "${REFS:-}" ] || { echo "::error::ls-remote failed after 3 attempts"; exit 1; }
+          TAG=$(printf '%s\n' "$REFS" | awk -F/ '{print $NF}' | grep -E "${TAG_REGEX}" | sort -V | tail -n1)
+          [ -n "$TAG" ] || { echo "::error::no tag matched ${TAG_REGEX}"; exit 1; }
+          echo "Latest stable release: $TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "override=github:${UPSTREAM_REPO}/${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Read release version from source
+        if: github.event_name != 'pull_request'
+        id: version
+        run: |
+          set -euo pipefail
+          # Authoritative version read from the source's own version file (cheap: no full build).
+          VERSION="$(cat "$(nix build --no-link --print-out-paths \
+            .#packages.x86_64-linux.version \
+            --override-input "${UPSTREAM_INPUT}" '${{ steps.resolve.outputs.override }}')")"
+          [ -n "$VERSION" ] || { echo "::error::empty version"; exit 1; }
+          echo "Release version: $VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GitHub Container Registry
         if: github.event_name != 'pull_request'
@@ -38,23 +74,34 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Load Image into Docker
+      - name: Bail early if this release is already published
         if: github.event_name != 'pull_request'
+        id: bail
         run: |
-          docker load < result
+          set -euo pipefail
+          TARGET="ghcr.io/${{ github.repository }}"
+          if docker manifest inspect "${TARGET}:${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
+            echo "${{ steps.version.outputs.version }} already published — nothing to do."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "New release ${{ steps.version.outputs.version }} — building."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Tag and Push Image
-        if: github.event_name != 'pull_request'
+      - name: Build release image
+        if: github.event_name != 'pull_request' && steps.bail.outputs.skip == 'false'
         run: |
-          # Convert repository owner to lowercase for registry compliance
-          OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          
-          # Match the local name defined in your flake.nix
-          LOCAL_IMAGE="minimalbase-ng:latest"
-          TARGET_IMAGE="ghcr.io/${OWNER_LC}/sabnzbd-ng"
-          
-          docker tag "$LOCAL_IMAGE" "${TARGET_IMAGE}:latest"
-          docker tag "$LOCAL_IMAGE" "${TARGET_IMAGE}:${{ github.sha }}"
-          
-          docker push "${TARGET_IMAGE}:latest"
-          docker push "${TARGET_IMAGE}:${{ github.sha }}"        
+          nix build -L \
+            --override-input "${UPSTREAM_INPUT}" '${{ steps.resolve.outputs.override }}'
+
+      - name: Tag and push image
+        if: github.event_name != 'pull_request' && steps.bail.outputs.skip == 'false'
+        run: |
+          set -euo pipefail
+          TARGET="ghcr.io/${{ github.repository }}"
+          VERSION="${{ steps.version.outputs.version }}"
+          LOCAL_IMAGE=$(docker load < result 2>&1 | grep "Loaded image:" | awk '{print $NF}')
+          docker tag "$LOCAL_IMAGE" "${TARGET}:${VERSION}"
+          docker tag "$LOCAL_IMAGE" "${TARGET}:latest"
+          docker push "${TARGET}:${VERSION}"
+          docker push "${TARGET}:latest"
